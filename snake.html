@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>الأفعى المرعبة</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { overflow: hidden; background: #000; width: 100vw; height: 100vh; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W = canvas.width = window.innerWidth;
+let H = canvas.height = window.innerHeight;
+let mx = W / 2, my = H / 2;
+
+window.addEventListener('resize', () => {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+});
+window.addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; });
+
+// ── Particles ──────────────────────────────────────────────────────────────
+const NPART = 120;
+const particles = Array.from({ length: NPART }, () => ({
+  x: Math.random() * W, y: Math.random() * H,
+  r: Math.random() * 1.8 + 0.3,
+  vx: (Math.random() - 0.5) * 0.3,
+  vy: -Math.random() * 0.5 - 0.1,
+  alpha: Math.random(),
+  hue: Math.random() > 0.5 ? 270 : 200   // purple or cyan
+}));
+
+function stepParticles() {
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy;
+    p.alpha += (Math.random() - 0.5) * 0.02;
+    p.alpha = Math.max(0.05, Math.min(0.9, p.alpha));
+    if (p.y < -5) { p.y = H + 5; p.x = Math.random() * W; }
+    if (p.x < -5) p.x = W + 5;
+    if (p.x > W + 5) p.x = -5;
+  }
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${p.hue},100%,70%,${p.alpha})`;
+    ctx.fill();
+  }
+}
+
+// ── Background fog layers ───────────────────────────────────────────────────
+let fogTime = 0;
+function drawBackground() {
+  // Deep dark base
+  ctx.fillStyle = '#06010f';
+  ctx.fillRect(0, 0, W, H);
+
+  // Radial cave-glow from center
+  const cg = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.75);
+  cg.addColorStop(0, 'rgba(60,0,90,0.35)');
+  cg.addColorStop(0.45, 'rgba(10,0,30,0.25)');
+  cg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = cg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle hex-grid pattern
+  drawHexGrid();
+
+  // Moving fog blobs
+  fogTime += 0.003;
+  const fogBlobs = [
+    { x: W * 0.25 + Math.cos(fogTime) * 80, y: H * 0.6 + Math.sin(fogTime * 0.7) * 60, r: W * 0.28, c: 'rgba(30,0,60,0.18)' },
+    { x: W * 0.75 + Math.sin(fogTime * 0.9) * 70, y: H * 0.4 + Math.cos(fogTime) * 50, r: W * 0.3, c: 'rgba(0,20,60,0.15)' },
+    { x: W * 0.5 + Math.cos(fogTime * 1.3) * 50, y: H * 0.8 + Math.sin(fogTime) * 30, r: W * 0.22, c: 'rgba(20,0,50,0.13)' },
+  ];
+  for (const b of fogBlobs) {
+    const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+    g.addColorStop(0, b.c);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+function drawHexGrid() {
+  const size = 38, row_h = size * Math.sqrt(3);
+  ctx.strokeStyle = 'rgba(90,0,140,0.07)';
+  ctx.lineWidth = 0.5;
+  for (let row = -1; row < H / row_h + 2; row++) {
+    for (let col = -1; col < W / (size * 3) + 2; col++) {
+      const offsetX = (row % 2) * size * 1.5;
+      const cx = col * size * 3 + offsetX;
+      const cy = row * row_h;
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (Math.PI / 3) * i;
+        const px = cx + size * Math.cos(a), py = cy + size * Math.sin(a);
+        i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+    }
+  }
+}
+
+// ── Snake ───────────────────────────────────────────────────────────────────
+const SEGS = 90;
+const SEG_LEN = 14;
+const RADIUS_BASE = 11;   // body half-width at widest
+
+let snakeAngle = 0;        // spiral driver
+let headX = W / 2, headY = H / 2;
+const body = Array.from({ length: SEGS }, (_, i) => ({
+  x: W / 2 - i * SEG_LEN, y: H / 2
+}));
+
+// Scale pattern colours
+const SCALE_COLORS = [
+  '#1a0a00', '#2a0d00', '#1e0900', '#120500'
+];
+
+function scaleColor(i) {
+  return SCALE_COLORS[i % SCALE_COLORS.length];
+}
+
+let eyeBlinkTimer = 0;
+let blinkOpen = true;
+
+function updateSnake(t) {
+  // Drive the head along a spiraling figure-8 / coil path
+  const centerX = W / 2 + (mx - W / 2) * 0.15;
+  const centerY = H / 2 + (my - H / 2) * 0.15;
+  snakeAngle += 0.022;
+
+  const spiralR = Math.min(W, H) * 0.30 + Math.sin(t * 0.0007) * Math.min(W, H) * 0.08;
+  const figureEight = {
+    x: centerX + spiralR * Math.sin(snakeAngle) * Math.cos(snakeAngle * 0.4),
+    y: centerY + spiralR * 0.55 * Math.sin(snakeAngle * 1.3)
+  };
+
+  // Mouse-attract gently
+  const mx2 = figureEight.x + (mx - figureEight.x) * 0.012;
+  const my2 = figureEight.y + (my - figureEight.y) * 0.012;
+  headX = mx2; headY = my2;
+
+  body[0].x = headX; body[0].y = headY;
+  for (let i = 1; i < SEGS; i++) {
+    const dx = body[i - 1].x - body[i].x;
+    const dy = body[i - 1].y - body[i].y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > SEG_LEN) {
+      const ratio = (dist - SEG_LEN) / dist;
+      body[i].x += dx * ratio;
+      body[i].y += dy * ratio;
+    }
+  }
+
+  // Blink
+  eyeBlinkTimer++;
+  if (eyeBlinkTimer > 180) { blinkOpen = false; }
+  if (eyeBlinkTimer > 195) { blinkOpen = true; eyeBlinkTimer = 0; }
+}
+
+function segRadius(i) {
+  // Taper: wide near head, taper tail
+  const t = i / SEGS;
+  if (t < 0.05) return RADIUS_BASE * (0.7 + t * 6);
+  if (t > 0.85) return RADIUS_BASE * (1 - (t - 0.85) / 0.15 * 0.9);
+  return RADIUS_BASE * (1 + Math.sin(t * Math.PI) * 0.25);
+}
+
+function drawSnakeBody() {
+  // Draw from tail to head so head is on top
+  for (let i = SEGS - 1; i >= 1; i--) {
+    const p = body[i], n = body[i - 1];
+    const r = segRadius(i);
+    const angle = Math.atan2(n.y - p.y, n.x - p.x);
+    const t = i / SEGS; // 0=head,1=tail
+
+    // Scale / body segment
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(angle);
+
+    // Body gradient (cross-section)
+    const sg = ctx.createLinearGradient(-r, 0, r, 0);
+    sg.addColorStop(0, '#0a0400');
+    sg.addColorStop(0.3, '#2d1200');
+    sg.addColorStop(0.5, '#1a0900');
+    sg.addColorStop(0.7, '#2d1200');
+    sg.addColorStop(1, '#0a0400');
+    ctx.fillStyle = sg;
+
+    ctx.beginPath();
+    ctx.ellipse(0, 0, SEG_LEN * 0.7, r, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Scale texture lines
+    if (i % 3 === 0) {
+      ctx.strokeStyle = `rgba(80,20,0,${0.4 - t * 0.3})`;
+      ctx.lineWidth = 0.6;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.7, Math.PI * 0.1, Math.PI * 0.9);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.4, Math.PI * 0.2, Math.PI * 0.8);
+      ctx.stroke();
+    }
+
+    // Belly lighter stripe
+    const belly = ctx.createLinearGradient(0, -r * 0.3, 0, r * 0.3);
+    belly.addColorStop(0, 'rgba(80,40,0,0.0)');
+    belly.addColorStop(0.5, `rgba(140,70,10,${0.25 - t * 0.15})`);
+    belly.addColorStop(1, 'rgba(80,40,0,0.0)');
+    ctx.fillStyle = belly;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, SEG_LEN * 0.65, r * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Glow rim
+    ctx.shadowBlur = 14;
+    ctx.shadowColor = 'rgba(180,40,0,0.3)';
+    ctx.strokeStyle = 'rgba(200,60,0,0.15)';
+    ctx.lineWidth = 0.8;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, SEG_LEN * 0.7, r, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.restore();
+  }
+}
+
+function drawSnakeHead(t) {
+  const p0 = body[0], p1 = body[1] || body[0];
+  const angle = Math.atan2(p0.y - p1.y, p0.x - p1.x);
+  const hr = RADIUS_BASE * 1.35; // head is wider
+
+  ctx.save();
+  ctx.translate(p0.x, p0.y);
+  ctx.rotate(angle);
+
+  // Head body
+  ctx.shadowBlur = 30;
+  ctx.shadowColor = 'rgba(255,40,0,0.5)';
+
+  const hg = ctx.createLinearGradient(-hr, 0, hr, 0);
+  hg.addColorStop(0, '#0e0400');
+  hg.addColorStop(0.4, '#2a0f00');
+  hg.addColorStop(0.5, '#1a0800');
+  hg.addColorStop(0.6, '#2a0f00');
+  hg.addColorStop(1, '#0e0400');
+  ctx.fillStyle = hg;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, hr * 1.4, hr, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Snout ridge
+  ctx.strokeStyle = 'rgba(60,20,0,0.7)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-hr * 0.3, -hr * 0.25);
+  ctx.lineTo(hr * 1.1, 0);
+  ctx.lineTo(-hr * 0.3, hr * 0.25);
+  ctx.stroke();
+
+  // Nostrils
+  const nostrilT = Math.sin(t * 0.002) * 0.5 + 0.5;
+  ctx.fillStyle = `rgba(0,0,0,${0.6 + nostrilT * 0.3})`;
+  ctx.beginPath(); ctx.arc(hr * 0.8, -hr * 0.22, 2.2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hr * 0.8, hr * 0.22, 2.2, 0, Math.PI * 2); ctx.fill();
+
+  // Eyes ────────────────────────────────────────────────────────────────────
+  const eyeY = hr * 0.55;
+  const eyeX = hr * 0.35;
+
+  // Eye track toward mouse (in local space)
+  const dxM = mx - p0.x, dyM = my - p0.y;
+  const mAngle = Math.atan2(dyM, dxM) - angle;
+  const trackR = 2.5;
+  const pupilOX = Math.cos(mAngle) * trackR;
+  const pupilOY = Math.sin(mAngle) * trackR;
+
+  for (const ey of [-eyeY, eyeY]) {
+    // Sclera / glow
+    ctx.shadowBlur = 22;
+    ctx.shadowColor = 'rgba(255,0,0,0.9)';
+    ctx.fillStyle = '#ff1a00';
+    ctx.beginPath(); ctx.arc(eyeX, ey, 7, 0, Math.PI * 2); ctx.fill();
+
+    // Iris
+    ctx.shadowBlur = 0;
+    const ig = ctx.createRadialGradient(eyeX, ey, 0, eyeX, ey, 6);
+    ig.addColorStop(0, '#ff6000');
+    ig.addColorStop(0.5, '#cc2200');
+    ig.addColorStop(1, '#440000');
+    ctx.fillStyle = ig;
+    ctx.beginPath(); ctx.arc(eyeX, ey, 6, 0, Math.PI * 2); ctx.fill();
+
+    // Pupil (vertical slit)
+    ctx.fillStyle = '#000';
+    ctx.save();
+    ctx.translate(eyeX + pupilOX, ey + pupilOY);
+    ctx.scale(0.35, 1);
+    ctx.beginPath(); ctx.arc(0, 0, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    // Blink
+    if (!blinkOpen) {
+      ctx.fillStyle = '#1a0900';
+      ctx.beginPath(); ctx.ellipse(eyeX, ey, 7, 3, 0, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Eyelid rim
+    ctx.strokeStyle = 'rgba(40,10,0,0.8)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(eyeX, ey, 7.5, 0, Math.PI * 2); ctx.stroke();
+
+    // Glint
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.beginPath(); ctx.arc(eyeX + 1.5 + pupilOX * 0.3, ey - 1.5 + pupilOY * 0.3, 1.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Forked tongue
+  const tonguePhase = Math.sin(t * 0.008);
+  if (tonguePhase > -0.3) {
+    const tLen = 22 + tonguePhase * 6;
+    const forkLen = 10;
+    ctx.strokeStyle = '#ff003c';
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = 'round';
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = '#ff0055';
+
+    ctx.beginPath();
+    ctx.moveTo(hr * 1.3, 0);
+    ctx.lineTo(hr * 1.3 + tLen, 0);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(hr * 1.3 + tLen, 0);
+    ctx.lineTo(hr * 1.3 + tLen + forkLen, -6);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(hr * 1.3 + tLen, 0);
+    ctx.lineTo(hr * 1.3 + tLen + forkLen, 6);
+    ctx.stroke();
+
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.restore();
+}
+
+function drawSnakeGlow() {
+  // Ambient glow along body
+  for (let i = 0; i < SEGS; i += 5) {
+    const p = body[i];
+    const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 28);
+    g.addColorStop(0, `rgba(140,20,0,${0.07 - (i / SEGS) * 0.05})`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 28, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// ── Dripping vignette ───────────────────────────────────────────────────────
+function drawVignette() {
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.85);
+  v.addColorStop(0, 'rgba(0,0,0,0)');
+  v.addColorStop(1, 'rgba(0,0,0,0.82)');
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ── Main loop ───────────────────────────────────────────────────────────────
+let t = 0;
+function loop() {
+  t++;
+  drawBackground();
+  stepParticles();
+  drawParticles();
+  drawSnakeGlow();
+  updateSnake(t);
+  drawSnakeBody();
+  drawSnakeHead(t);
+  drawVignette();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
